@@ -39,13 +39,16 @@
 
 /* ══ 1. PASTE YOUR SUPABASE DETAILS HERE ══════════════════
    From your Supabase dashboard → Project Settings → API   */
-const SUPABASE_URL = "https://dmtpopwbmebwharadzmw.supabase.co";      // e.g. https://abcdefgh.supabase.co
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRtdHBvcHdibWVid2hhcmFkem13Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcyMzU2OTQsImV4cCI6MjEwMjgxMTY5NH0.gXqT2cqrd3FGYd7tTRFta7lKNCdYLFHTdQ44ivtWZJ0";    // the long "anon / public" key
+const SUPABASE_URL = "https://dmtpopwbmebwharadzmw.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRtdHBvcHdibWVid2hhcmFkem13Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcyMzU2OTQsImV4cCI6MjEwMjgxMTY5NH0.gXqT2cqrd3FGYd7tTRFta7lKNCdYLFHTdQ44ivtWZJ0";
 /* ═════════════════════════════════════════════════════════ */
 
 const PASSCODE = "bookquad"; // shared quad passcode (case-insensitive)
 
 const MEMBERS = ["Abhilasha", "Amika", "Ashni", "Archana"];
+
+// First-tap defaults — changeable anytime via the "Change city" link.
+const DEFAULT_CITY = { Abhilasha: "NYC", Amika: "NYC", Ashni: "ATX", Archana: "SF" };
 
 const CITIES = [
   { id: "SF", label: "San Francisco", tz: "America/Los_Angeles", abbr: "PT" },
@@ -71,8 +74,10 @@ const STATE_CYCLE = { unset: "free", free: "maybe", maybe: "busy", busy: "unset"
 const { useState, useEffect, useRef, useMemo } = React;
 
 /* ── Supabase key-value adapter ────────────────────────── */
-const configured = !SUPABASE_URL.includes("PASTE") && !SUPABASE_ANON_KEY.includes("PASTE");
-const sb = configured ? supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
+// Forgive common paste mistakes: trailing slashes or the /rest/v1/ path suffix.
+const CLEAN_URL = SUPABASE_URL.replace(/\/rest\/v1\/?\s*$/, "").replace(/\/+\s*$/, "").trim();
+const configured = !CLEAN_URL.includes("PASTE") && !SUPABASE_ANON_KEY.includes("PASTE");
+const sb = configured ? supabase.createClient(CLEAN_URL, SUPABASE_ANON_KEY.trim()) : null;
 
 async function kvGet(key) {
   try {
@@ -236,8 +241,10 @@ function BookQuadScheduler() {
   const myResp = (me && responses[me]) || { dates: {}, slots: {} };
 
   function pickMember(name) {
-    if (memberTz[name]) setMe(name);
-    else setPendingCity(name);
+    if (memberTz[name]) { setMe(name); return; }
+    // First visit: assign this member's default city automatically (no question asked)
+    const city = CITIES.find((c) => c.id === DEFAULT_CITY[name]) || CITIES[0];
+    confirmCity(name, city);
   }
   async function confirmCity(name, city) {
     setMemberTz((p) => ({ ...p, [name]: city.tz }));
@@ -396,14 +403,19 @@ function BookQuadScheduler() {
           <div className="mx-auto mt-0" style={{ height: 10, maxWidth: 320, background: PALETTE.ink, borderRadius: 2 }} />
           <p className="text-sm mt-3" style={{ color: PALETTE.inkSoft }}>
             {me
-              ? <React.Fragment>Hi <b>{me}</b> — tap dates below. Everything saves automatically.</React.Fragment>
+              ? <React.Fragment>
+                  Hi <b>{me}</b> — tap dates below. Everything saves automatically.{" "}
+                  <button className="underline" onClick={() => setPendingCity(me)}>
+                    Change city ({(CITIES.find((c) => c.tz === myTz) || {}).id || "?"})
+                  </button>
+                </React.Fragment>
               : "Tap your book on the shelf to start."}
           </p>
         </header>
 
         {pendingCity && (
           <div className="rounded-xl p-4 mt-3 text-center" style={{ background: PALETTE.card, border: `1.5px solid ${PALETTE.line}` }}>
-            <p className="mb-3">Quick one-time question, <b>{pendingCity}</b> — where do you live? (Sets your time zone.)</p>
+            <p className="mb-3">Where are you answering from, <b>{pendingCity}</b>? (Sets your time zone — you can change it anytime.)</p>
             <div className="flex flex-wrap justify-center gap-2">
               {CITIES.map((c) => (
                 <button key={c.id} onClick={() => confirmCity(pendingCity, c)}
