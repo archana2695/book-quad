@@ -45,6 +45,10 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 
 const PASSCODE = "bookquad"; // shared quad passcode (case-insensitive)
 
+// Lock the app to one month ("YYYY-MM"). Set to null to restore
+// the month arrows + current-month behavior.
+const PINNED_MONTH = "2026-09";
+
 const MEMBERS = ["Abhilasha", "Amika", "Ashni", "Archana"];
 
 // First-tap defaults — changeable anytime via the "Change city" link.
@@ -193,7 +197,7 @@ function BookQuadScheduler() {
   const [me, setMe] = useState(null);
   const [pendingCity, setPendingCity] = useState(null);
   const [memberTz, setMemberTz] = useState({});
-  const [mk, setMk] = useState(() => monthKey(new Date()));
+  const [mk, setMk] = useState(() => PINNED_MONTH || monthKey(new Date()));
   const [responses, setResponses] = useState({});
   const [loading, setLoading] = useState(true);
   const [saveState, setSaveState] = useState("idle");
@@ -431,11 +435,15 @@ function BookQuadScheduler() {
         {me && myTz && (
           <React.Fragment>
             <div className="flex items-center justify-between mt-6 mb-2">
-              <button onClick={() => setMk(shiftMonth(mk, -1))} aria-label="Previous month"
-                className="w-9 h-9 rounded-full text-lg" style={{ border: `1.5px solid ${PALETTE.ink}` }}>←</button>
-              <h2 className="text-2xl">{monthLabel(mk)}</h2>
-              <button onClick={() => setMk(shiftMonth(mk, 1))} aria-label="Next month"
-                className="w-9 h-9 rounded-full text-lg" style={{ border: `1.5px solid ${PALETTE.ink}` }}>→</button>
+              {!PINNED_MONTH && (
+                <button onClick={() => setMk(shiftMonth(mk, -1))} aria-label="Previous month"
+                  className="w-9 h-9 rounded-full text-lg" style={{ border: `1.5px solid ${PALETTE.ink}` }}>←</button>
+              )}
+              <h2 className="text-2xl mx-auto">{monthLabel(mk)}</h2>
+              {!PINNED_MONTH && (
+                <button onClick={() => setMk(shiftMonth(mk, 1))} aria-label="Next month"
+                  className="w-9 h-9 rounded-full text-lg" style={{ border: `1.5px solid ${PALETTE.ink}` }}>→</button>
+              )}
             </div>
 
             <div className="flex items-center justify-center gap-3 text-xs mb-3" style={{ color: PALETTE.inkSoft }}>
