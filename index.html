@@ -23,7 +23,15 @@
 <body>
 <div id="root"></div>
 
-<script type="text/babel" data-presets="react">
+<script>
+  /* Newer Babel-standalone defaults to the "automatic" JSX runtime, which emits
+     ES-module imports that plain scripts can't run (→ blank page). Force classic. */
+  Babel.registerPreset("react-classic", {
+    presets: [[Babel.availablePresets["react"], { runtime: "classic" }]],
+  });
+</script>
+
+<script type="text/babel" data-presets="react-classic">
 /* ─────────────────────────────────────────────────────────
    BOOK QUAD · Monthly Meetup Scheduler  (GitHub + Supabase)
    Four roommates, three time zones, one hour a month.
