@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="robots" content="noindex" />
+<title>BOOK QUAD · Monthly Scheduler</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,650&family=Karla:wght@400;500;700&display=swap" rel="stylesheet" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: 'Karla', system-ui, sans-serif; }
+  h1, h2, .serif { font-family: 'Fraunces', Georgia, serif; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+  .daycell:focus-visible { outline: 2px solid #213A30; outline-offset: 2px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+/* ─────────────────────────────────────────────────────────
+   BOOK QUAD · Monthly Meetup Scheduler  (GitHub + Supabase)
+   Four roommates, three time zones, one hour a month.
+   ───────────────────────────────────────────────────────── */
+
+/* ══ 1. PASTE YOUR SUPABASE DETAILS HERE ══════════════════
+   From your Supabase dashboard → Project Settings → API   */
+const SUPABASE_URL = "https://dmtpopwbmebwharadzmw.supabase.co/rest/v1/";      // e.g. https://abcdefgh.supabase.co
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRtdHBvcHdibWVid2hhcmFkem13Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcyMzU2OTQsImV4cCI6MjEwMjgxMTY5NH0.gXqT2cqrd3FGYd7tTRFta7lKNCdYLFHTdQ44ivtWZJ0";    // the long "anon / public" key
+/* ═════════════════════════════════════════════════════════ */
+
+const PASSCODE = "bookquad"; // shared quad passcode (case-insensitive)
+
+const MEMBERS = ["Abhilasha", "Amika", "Ashni", "Archana"];
+
+const CITIES = [
+  { id: "SF", label: "San Francisco", tz: "America/Los_Angeles", abbr: "PT" },
+  { id: "ATX", label: "Austin", tz: "America/Chicago", abbr: "CT" },
+  { id: "NYC", label: "New York", tz: "America/New_York", abbr: "ET" },
+];
+
+// Shared 60-min candidate slots, anchored to Eastern Time.
+const SLOTS = [
+  { id: "s12", etHour: 12 },
+  { id: "s15", etHour: 15 },
+  { id: "s18", etHour: 18 },
+  { id: "s20", etHour: 20 },
+];
+
+const PALETTE = {
+  ink: "#213A30", inkSoft: "#3E5A4D", paper: "#F4F1E7", card: "#FBF9F2",
+  line: "#D8D2C0", free: "#4E7A5A", maybe: "#C98F2E", busy: "#B0A896",
+};
+const MEMBER_COLORS = { Abhilasha: "#A94459", Amika: "#C98F2E", Ashni: "#3F6489", Archana: "#4E7A5A" };
+const STATE_CYCLE = { unset: "free", free: "maybe", maybe: "busy", busy: "unset" };
+
+const { useState, useEffect, useRef, useMemo } = React;
+
+/* ── Supabase key-value adapter ────────────────────────── */
+const configured = !SUPABASE_URL.includes("PASTE") && !SUPABASE_ANON_KEY.includes("PASTE");
+const sb = configured ? supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
+
+async function kvGet(key) {
+  try {
+    const { data, error } = await sb.from("bookquad").select("value").eq("key", key).maybeSingle();
+    if (error) return null;
+    return data ? data.value : null;
+  } catch { return null; }
+}
+async function kvSet(key, value) {
+  try {
+    const { error } = await sb.from("bookquad").upsert({ key, value, updated_at: new Date().toISOString() });
+    return !error;
+  } catch { return false; }
+}
+
+/* ── time zone helpers (DST-safe via Intl) ─────────────── */
+function tzOffsetMin(date, tz) {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz, hour12: false, year: "numeric", month: "2-digit",
+    day: "2-digit", hour: "2-digit", minute: "2-digit",
+  });
+  const p = {};
+  fmt.formatToParts(date).forEach((x) => (p[x.type] = x.value));
+  const asUTC = Date.UTC(p.year, p.month - 1, p.day, p.hour === "24" ? 0 : p.hour, p.minute);
+  return (asUTC - date.getTime()) / 60000;
+}
+function etInstant(dateStr, etHour) {
+  const guess = new Date(`${dateStr}T${String(etHour).padStart(2, "0")}:00:00Z`);
+  let inst = new Date(guess.getTime() - tzOffsetMin(guess, "America/New_York") * 60000);
+  inst = new Date(guess.getTime() - tzOffsetMin(inst, "America/New_York") * 60000);
+  return inst;
+}
+function fmtInTz(instant, tz) {
+  return new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "numeric", minute: "2-digit" })
+    .format(instant).replace(":00", "");
+}
+function slotLabel(dateStr, slot, tz) { return fmtInTz(etInstant(dateStr, slot.etHour), tz); }
+function slotAllZones(dateStr, slot) {
+  const inst = etInstant(dateStr, slot.etHour);
+  return CITIES.slice().reverse().map((c) => `${fmtInTz(inst, c.tz)} ${c.abbr}`).join(" · ");
+}
+
+/* ── month helpers ─────────────────────────────────────── */
+function monthKey(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; }
+function monthLabel(key) {
+  const [y, m] = key.split("-").map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" });
+}
+function shiftMonth(key, delta) {
+  const [y, m] = key.split("-").map(Number);
+  return monthKey(new Date(y, m - 1 + delta, 1));
+}
+function monthDays(key) {
+  const [y, m] = key.split("-").map(Number);
+  const first = new Date(y, m - 1, 1);
+  const days = [];
+  for (let pad = 0; pad < first.getDay(); pad++) days.push(null);
+  const count = new Date(y, m, 0).getDate();
+  for (let d = 1; d <= count; d++)
+    days.push(`${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`);
+  return days;
+}
+function todayStr() {
+  const t = new Date();
+  return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
+}
+
+const memberKey = (name) => `bq:member:${name}`;
+const respKey = (mk, name) => `bq:resp:${mk}:${name}`;
+
+/* ── tiny UI atoms ─────────────────────────────────────── */
+function Spine({ name, active, onClick, tilt }) {
+  const c = MEMBER_COLORS[name];
+  return (
+    <button
+      onClick={onClick}
+      aria-pressed={active}
+      title={`I'm ${name}`}
+      className="focus:outline focus:outline-2"
+      style={{
+        background: c, color: PALETTE.card,
+        fontFamily: "'Fraunces', Georgia, serif",
+        writingMode: "vertical-rl",
+        transform: tilt ? "rotate(7deg)" : "none",
+        transformOrigin: "center bottom",
+        height: active ? 148 : 132, width: 44,
+        borderRadius: "4px 4px 6px 6px",
+        border: active ? `3px solid ${PALETTE.ink}` : "3px solid transparent",
+        boxShadow: active ? "0 6px 0 rgba(33,58,48,0.35)" : "0 3px 0 rgba(33,58,48,0.2)",
+        letterSpacing: "0.06em", fontSize: 15, fontWeight: 600, cursor: "pointer",
+        transition: "height 160ms ease, box-shadow 160ms ease", outlineOffset: 3,
+      }}>
+      {name.toUpperCase()}
+    </button>
+  );
+}
+
+function StatusPill({ state }) {
+  const map = {
+    free: { bg: PALETTE.free, t: "Free" },
+    maybe: { bg: PALETTE.maybe, t: "Maybe" },
+    busy: { bg: PALETTE.busy, t: "Can't" },
+  };
+  const s = map[state];
+  return <span style={{ background: s.bg, color: "#fff" }} className="text-xs px-2 py-0.5 rounded-full">{s.t}</span>;
+}
+
+/* ── main app ──────────────────────────────────────────── */
+function BookQuadScheduler() {
+  const [unlocked, setUnlocked] = useState(false);
+  const [codeInput, setCodeInput] = useState("");
+  const [codeError, setCodeError] = useState(false);
+  const [me, setMe] = useState(null);
+  const [pendingCity, setPendingCity] = useState(null);
+  const [memberTz, setMemberTz] = useState({});
+  const [mk, setMk] = useState(() => monthKey(new Date()));
+  const [responses, setResponses] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [saveState, setSaveState] = useState("idle");
+  const saveTimer = useRef(null);
+  const today = todayStr();
+
+  async function loadAll(monthK) {
+    const tzMap = {}, next = {};
+    for (const n of MEMBERS) {
+      const meta = await kvGet(memberKey(n));
+      if (meta && meta.tz) tzMap[n] = meta.tz;
+      const r = await kvGet(respKey(monthK, n));
+      if (r) next[n] = r;
+    }
+    setMemberTz((prev) => ({ ...prev, ...tzMap }));
+    setResponses(next);
+    setLoading(false);
+  }
+
+  /* load on unlock + month change, then poll every 60s so
+     everyone sees fresh answers without refreshing */
+  useEffect(() => {
+    if (!unlocked || !configured) return;
+    setLoading(true);
+    loadAll(mk);
+    const t = setInterval(() => loadAll(mk), 60000);
+    return () => clearInterval(t);
+  }, [mk, unlocked]);
+
+  const myTz = me ? memberTz[me] : null;
+  const myResp = (me && responses[me]) || { dates: {}, slots: {} };
+
+  function pickMember(name) {
+    if (memberTz[name]) setMe(name);
+    else setPendingCity(name);
+  }
+  async function confirmCity(name, city) {
+    setMemberTz((p) => ({ ...p, [name]: city.tz }));
+    setPendingCity(null);
+    setMe(name);
+    await kvSet(memberKey(name), { tz: city.tz, city: city.id });
+  }
+
+  function queueSave(nextResp) {
+    setResponses((r) => ({ ...r, [me]: nextResp }));
+    setSaveState("saving");
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      const ok = await kvSet(respKey(mk, me), { ...nextResp, updatedAt: Date.now() });
+      setSaveState(ok ? "saved" : "error");
+    }, 500);
+  }
+
+  function tapDate(dateStr) {
+    if (!me || dateStr < today) return;
+    const cur = myResp.dates[dateStr] || "unset";
+    const nxt = STATE_CYCLE[cur];
+    const dates = { ...myResp.dates };
+    const slots = { ...myResp.slots };
+    if (nxt === "unset") { delete dates[dateStr]; delete slots[dateStr]; }
+    else dates[dateStr] = nxt;
+    if (nxt === "busy") delete slots[dateStr];
+    queueSave({ ...myResp, dates, slots });
+  }
+
+  function toggleSlot(dateStr, slotId) {
+    const cur = new Set(myResp.slots[dateStr] || []);
+    cur.has(slotId) ? cur.delete(slotId) : cur.add(slotId);
+    queueSave({ ...myResp, slots: { ...myResp.slots, [dateStr]: [...cur] } });
+  }
+
+  function clearMine() { queueSave({ dates: {}, slots: {} }); }
+
+  const results = useMemo(() => {
+    const scores = [];
+    const responded = MEMBERS.filter((n) => responses[n] && Object.keys(responses[n].dates || {}).length);
+    if (!responded.length) return { rows: [], responded };
+    const allDates = new Set();
+    responded.forEach((n) => Object.keys(responses[n].dates).forEach((d) => allDates.add(d)));
+    for (const d of allDates) {
+      let score = 0, freeCount = 0;
+      const who = {};
+      responded.forEach((n) => {
+        const s = responses[n].dates[d];
+        who[n] = s || null;
+        if (s === "free") { score += 1; freeCount += 1; }
+        if (s === "maybe") score += 0.5;
+      });
+      const avail = responded.filter((n) => ["free", "maybe"].includes(responses[n].dates[d]));
+      const slotWins = SLOTS.filter((s) =>
+        avail.length && avail.every((n) => ((responses[n].slots || {})[d] || []).includes(s.id))
+      );
+      scores.push({ date: d, score, freeCount, who, slotWins });
+    }
+    scores.sort((a, b) => b.score - a.score || a.date.localeCompare(b.date));
+    return { rows: scores.slice(0, 5), responded };
+  }, [responses]);
+
+  const perfect = results.rows.find((r) => r.freeCount === MEMBERS.length && r.slotWins.length > 0);
+
+  const myFreeDates = Object.entries(myResp.dates)
+    .filter(([, s]) => s !== "busy").map(([d]) => d).sort();
+
+  /* ── setup notice (before Supabase details are pasted) ── */
+  if (!configured) {
+    return (
+      <div style={{ background: PALETTE.paper, minHeight: "100vh", color: PALETTE.ink }}>
+        <div className="max-w-md mx-auto px-4 pt-20 text-center">
+          <h1 className="text-4xl mb-4" style={{ fontWeight: 650 }}>BOOK QUAD</h1>
+          <div className="rounded-xl p-5 text-left text-sm" style={{ background: PALETTE.card, border: `1.5px solid ${PALETTE.line}` }}>
+            <p className="serif text-lg mb-2">Almost there — one setup step</p>
+            <p>Open <b>index.html</b> and paste your Supabase project URL and anon key into the two lines at the top of the script (they're marked with <b>PASTE_YOUR…</b>). The full walkthrough is in <b>SETUP.md</b>.</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  /* ── passcode gate ── */
+  function tryUnlock() {
+    if (codeInput.trim().toLowerCase() === PASSCODE) { setUnlocked(true); setCodeError(false); }
+    else setCodeError(true);
+  }
+
+  if (!unlocked) {
+    return (
+      <div style={{ background: PALETTE.paper, minHeight: "100vh", color: PALETTE.ink }}>
+        <div className="max-w-sm mx-auto px-4 pt-20 text-center">
+          <p className="text-xs tracking-widest uppercase" style={{ color: PALETTE.inkSoft }}>Members only</p>
+          <h1 className="text-4xl mt-1 mb-6" style={{ fontWeight: 650 }}>BOOK QUAD</h1>
+          <div className="rounded-xl p-5 text-left"
+            style={{ background: PALETTE.card, border: `1.5px solid ${PALETTE.line}`, boxShadow: "0 4px 0 rgba(33,58,48,0.15)" }}>
+            <label htmlFor="bq-pass" className="serif block text-lg mb-2">Library card, please</label>
+            <input id="bq-pass" type="password" value={codeInput} autoComplete="off"
+              onChange={(e) => { setCodeInput(e.target.value); setCodeError(false); }}
+              onKeyDown={(e) => e.key === "Enter" && tryUnlock()}
+              placeholder="Quad passcode"
+              className="w-full px-3 py-2 rounded-lg text-base"
+              style={{ border: `1.5px solid ${codeError ? "#A94459" : PALETTE.line}`, background: PALETTE.paper, color: PALETTE.ink }} />
+            {codeError && (
+              <p className="text-sm mt-2" style={{ color: "#A94459" }} aria-live="polite">
+                That's not it — ask the quad for the passcode.
+              </p>
+            )}
+            <button onClick={tryUnlock} className="w-full mt-3 py-2 rounded-lg font-bold"
+              style={{ background: PALETTE.ink, color: PALETTE.card }}>
+              Open the shelf
+            </button>
+          </div>
+          <p className="text-xs mt-4" style={{ color: PALETTE.inkSoft }}>Four roommates · one book · once a month</p>
+        </div>
+      </div>
+    );
+  }
+
+  /* ── main render ── */
+  return (
+    <div style={{ background: PALETTE.paper, minHeight: "100vh", color: PALETTE.ink }}>
+      <div className="max-w-2xl mx-auto px-4 pb-16">
+        <header className="pt-8 pb-2 text-center">
+          <p className="text-xs tracking-widest uppercase" style={{ color: PALETTE.inkSoft }}>
+            One book · three months · one hour a month
+          </p>
+          <h1 className="text-4xl mt-1 mb-5" style={{ fontWeight: 650 }}>BOOK QUAD</h1>
+          <div className="flex items-end justify-center gap-1.5" role="group" aria-label="Pick your name">
+            {MEMBERS.map((n, i) => (
+              <Spine key={n} name={n} active={me === n} tilt={i === 3} onClick={() => pickMember(n)} />
+            ))}
+          </div>
+          <div className="mx-auto mt-0" style={{ height: 10, maxWidth: 320, background: PALETTE.ink, borderRadius: 2 }} />
+          <p className="text-sm mt-3" style={{ color: PALETTE.inkSoft }}>
+            {me
+              ? <React.Fragment>Hi <b>{me}</b> — tap dates below. Everything saves automatically.</React.Fragment>
+              : "Tap your book on the shelf to start."}
+          </p>
+        </header>
+
+        {pendingCity && (
+          <div className="rounded-xl p-4 mt-3 text-center" style={{ background: PALETTE.card, border: `1.5px solid ${PALETTE.line}` }}>
+            <p className="mb-3">Quick one-time question, <b>{pendingCity}</b> — where do you live? (Sets your time zone.)</p>
+            <div className="flex flex-wrap justify-center gap-2">
+              {CITIES.map((c) => (
+                <button key={c.id} onClick={() => confirmCity(pendingCity, c)}
+                  className="px-4 py-2 rounded-full font-medium"
+                  style={{ background: PALETTE.ink, color: PALETTE.card }}>
+                  {c.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {me && myTz && (
+          <React.Fragment>
+            <div className="flex items-center justify-between mt-6 mb-2">
+              <button onClick={() => setMk(shiftMonth(mk, -1))} aria-label="Previous month"
+                className="w-9 h-9 rounded-full text-lg" style={{ border: `1.5px solid ${PALETTE.ink}` }}>←</button>
+              <h2 className="text-2xl">{monthLabel(mk)}</h2>
+              <button onClick={() => setMk(shiftMonth(mk, 1))} aria-label="Next month"
+                className="w-9 h-9 rounded-full text-lg" style={{ border: `1.5px solid ${PALETTE.ink}` }}>→</button>
+            </div>
+
+            <div className="flex items-center justify-center gap-3 text-xs mb-3" style={{ color: PALETTE.inkSoft }}>
+              <span>Tap a date to cycle:</span>
+              <StatusPill state="free" /> <StatusPill state="maybe" /> <StatusPill state="busy" />
+            </div>
+
+            <div className="rounded-xl p-3" style={{ background: PALETTE.card, border: `1.5px solid ${PALETTE.line}` }}>
+              <div className="grid grid-cols-7 gap-1 text-center text-xs mb-1" style={{ color: PALETTE.inkSoft }}>
+                {["S", "M", "T", "W", "T", "F", "S"].map((d, i) => <div key={i}>{d}</div>)}
+              </div>
+              <div className="grid grid-cols-7 gap-1">
+                {monthDays(mk).map((d, i) => {
+                  if (!d) return <div key={`p${i}`} />;
+                  const st = myResp.dates[d];
+                  const past = d < today;
+                  const bg = st === "free" ? PALETTE.free : st === "maybe" ? PALETTE.maybe : st === "busy" ? PALETTE.busy : "transparent";
+                  const fg = st ? "#fff" : past ? PALETTE.busy : PALETTE.ink;
+                  return (
+                    <button key={d} onClick={() => tapDate(d)} disabled={past}
+                      className="daycell aspect-square rounded-lg text-sm font-medium"
+                      aria-label={`${d}${st ? `, marked ${st}` : ""}`}
+                      style={{
+                        background: bg, color: fg,
+                        border: `1.5px solid ${st ? "transparent" : PALETTE.line}`,
+                        textDecoration: st === "busy" ? "line-through" : "none",
+                        cursor: past ? "default" : "pointer",
+                        opacity: past ? 0.45 : 1,
+                        transition: "background 120ms ease",
+                      }}>
+                      {Number(d.slice(-2))}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {myFreeDates.length > 0 && (
+              <section className="mt-5">
+                <h2 className="text-xl mb-1">Which hours work?</h2>
+                <p className="text-sm mb-3" style={{ color: PALETTE.inkSoft }}>
+                  Times shown in <b>your</b> time ({(CITIES.find((c) => c.tz === myTz) || {}).label}). No math required.
+                </p>
+                <div className="space-y-2">
+                  {myFreeDates.map((d) => (
+                    <div key={d} className="rounded-xl px-3 py-2.5 flex flex-wrap items-center gap-2"
+                      style={{ background: PALETTE.card, border: `1.5px solid ${PALETTE.line}` }}>
+                      <span className="serif mr-1" style={{ minWidth: 86 }}>
+                        {new Date(d + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+                      </span>
+                      <StatusPill state={myResp.dates[d]} />
+                      {SLOTS.map((s) => {
+                        const on = (myResp.slots[d] || []).includes(s.id);
+                        return (
+                          <button key={s.id} onClick={() => toggleSlot(d, s.id)}
+                            className="px-3 py-1 rounded-full text-sm" aria-pressed={on}
+                            style={{
+                              background: on ? MEMBER_COLORS[me] : "transparent",
+                              color: on ? "#fff" : PALETTE.ink,
+                              border: `1.5px solid ${on ? MEMBER_COLORS[me] : PALETTE.line}`,
+                            }}>
+                            {slotLabel(d, s, myTz)}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            <div className="flex items-center justify-between mt-3 text-sm" style={{ color: PALETTE.inkSoft }}>
+              <span aria-live="polite">
+                {saveState === "saving" && "Saving…"}
+                {saveState === "saved" && "✓ Saved for the quad to see"}
+                {saveState === "error" && "Couldn't save — check your connection and tap a date again."}
+              </span>
+              <button onClick={clearMine} className="underline">Clear my answers</button>
+            </div>
+          </React.Fragment>
+        )}
+
+        <section className="mt-8">
+          <h2 className="text-2xl mb-1">Best times for the quad</h2>
+          {loading ? (
+            <p className="text-sm" style={{ color: PALETTE.inkSoft }}>Opening the ledger…</p>
+          ) : results.responded.length === 0 ? (
+            <p className="text-sm" style={{ color: PALETTE.inkSoft }}>
+              No answers for {monthLabel(mk)} yet. Be the first bookmark on the page.
+            </p>
+          ) : (
+            <React.Fragment>
+              <p className="text-sm mb-3" style={{ color: PALETTE.inkSoft }}>
+                {results.responded.length} of 4 answered ({results.responded.join(", ")}). “Maybe” counts as half.
+              </p>
+
+              {perfect && (
+                <div className="rounded-xl p-4 mb-3 text-center" style={{ background: PALETTE.ink, color: PALETTE.card }}>
+                  <div className="serif text-xl">✻ The quad aligns ✻</div>
+                  <div className="mt-1">
+                    All four are free {new Date(perfect.date + "T12:00:00").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
+                    {" — "}{slotAllZones(perfect.date, perfect.slotWins[0])}
+                  </div>
+                </div>
+              )}
+
+              <div className="space-y-2">
+                {results.rows.map((r) => (
+                  <div key={r.date} className="rounded-xl px-4 py-3"
+                    style={{ background: PALETTE.card, border: `1.5px solid ${PALETTE.line}` }}>
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <span className="serif text-lg">
+                        {new Date(r.date + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+                      </span>
+                      <span className="text-sm" style={{ color: PALETTE.inkSoft }}>
+                        {r.freeCount} free · score {r.score}
+                      </span>
+                    </div>
+                    <div className="flex gap-1.5 mt-2 flex-wrap">
+                      {MEMBERS.map((n) => {
+                        const s = r.who[n];
+                        return (
+                          <span key={n} className="text-xs px-2 py-0.5 rounded-full"
+                            title={`${n}: ${s || "no answer"}`}
+                            style={{
+                              background: s === "free" ? MEMBER_COLORS[n] : "transparent",
+                              color: s === "free" ? "#fff" : PALETTE.inkSoft,
+                              border: `1.5px solid ${s ? MEMBER_COLORS[n] : PALETTE.line}`,
+                              opacity: s === "busy" ? 0.5 : 1,
+                              textDecoration: s === "busy" ? "line-through" : "none",
+                            }}>
+                            {n}
+                          </span>
+                        );
+                      })}
+                    </div>
+                    {r.slotWins.length > 0 && (
+                      <div className="text-sm mt-2" style={{ color: PALETTE.inkSoft }}>
+                        Overlapping hour{r.slotWins.length > 1 ? "s" : ""}:{" "}
+                        {r.slotWins.map((s) => slotAllZones(r.date, s)).join("  ·  ")}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </React.Fragment>
+          )}
+        </section>
+
+        <footer className="mt-10 rounded-xl p-4 text-sm"
+          style={{ border: `1.5px dashed ${PALETTE.ink}`, color: PALETTE.inkSoft }}>
+          <div className="serif text-base mb-1" style={{ color: PALETTE.ink }}>House rules</div>
+          One of us picks the book every 3 months · any genre goes · aim for ~300 pages (a gentle rule, not a hard one) · we meet for 60 minutes, once a month.
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<BookQuadScheduler />);
+</script>
+</body>
+</html>
