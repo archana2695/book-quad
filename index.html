@@ -39,8 +39,8 @@
 
 /* ══ 1. PASTE YOUR SUPABASE DETAILS HERE ══════════════════
    From your Supabase dashboard → Project Settings → API   */
-const SUPABASE_URL = "https://dmtpopwbmebwharadzmw.supabase.co/rest/v1/";      // e.g. https://abcdefgh.supabase.co
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRtdHBvcHdibWVid2hhcmFkem13Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcyMzU2OTQsImV4cCI6MjEwMjgxMTY5NH0.gXqT2cqrd3FGYd7tTRFta7lKNCdYLFHTdQ44ivtWZJ0";    // the long "anon / public" key
+const SUPABASE_URL = "PASTE_YOUR_PROJECT_URL_HERE";      // e.g. https://abcdefgh.supabase.co
+const SUPABASE_ANON_KEY = "PASTE_YOUR_ANON_KEY_HERE";    // the long "anon / public" key
 /* ═════════════════════════════════════════════════════════ */
 
 const PASSCODE = "bookquad"; // shared quad passcode (case-insensitive)
@@ -84,8 +84,8 @@ async function kvGet(key) {
 async function kvSet(key, value) {
   try {
     const { error } = await sb.from("bookquad").upsert({ key, value, updated_at: new Date().toISOString() });
-    return !error;
-  } catch { return false; }
+    return error ? { ok: false, msg: error.message } : { ok: true };
+  } catch (e) { return { ok: false, msg: (e && e.message) || "network error" }; }
 }
 
 /* ── time zone helpers (DST-safe via Intl) ─────────────── */
@@ -192,7 +192,11 @@ function BookQuadScheduler() {
   const [responses, setResponses] = useState({});
   const [loading, setLoading] = useState(true);
   const [saveState, setSaveState] = useState("idle");
+  const [saveErr, setSaveErr] = useState("");
   const saveTimer = useRef(null);
+  const dirtyRef = useRef(false); // true while local edits haven't reached the server
+  const meRef = useRef(null);
+  useEffect(() => { meRef.current = me; }, [me]);
   const today = todayStr();
 
   async function loadAll(monthK) {
@@ -204,7 +208,17 @@ function BookQuadScheduler() {
       if (r) next[n] = r;
     }
     setMemberTz((prev) => ({ ...prev, ...tzMap }));
-    setResponses(next);
+    setResponses((prev) => {
+      const merged = { ...next };
+      const who = meRef.current;
+      // Never let a background refresh wipe out my own newer / unsaved edits
+      if (who && prev[who]) {
+        const localTs = prev[who].updatedAt || 0;
+        const serverTs = (next[who] && next[who].updatedAt) || 0;
+        if (dirtyRef.current || localTs > serverTs) merged[who] = prev[who];
+      }
+      return merged;
+    });
     setLoading(false);
   }
 
@@ -233,13 +247,31 @@ function BookQuadScheduler() {
   }
 
   function queueSave(nextResp) {
-    setResponses((r) => ({ ...r, [me]: nextResp }));
+    const stamped = { ...nextResp, updatedAt: Date.now() };
+    dirtyRef.current = true;
+    setResponses((r) => ({ ...r, [me]: stamped }));
     setSaveState("saving");
+    setSaveErr("");
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
-      const ok = await kvSet(respKey(mk, me), { ...nextResp, updatedAt: Date.now() });
-      setSaveState(ok ? "saved" : "error");
+      const res = await kvSet(respKey(mk, me), stamped);
+      if (res.ok) {
+        dirtyRef.current = false;
+        setSaveState("saved");
+      } else {
+        // Keep edits on screen (dirtyRef stays true) and show why it failed
+        setSaveState("error");
+        setSaveErr(res.msg);
+      }
     }, 500);
+  }
+
+  // Sensible defaults when a date is first marked free:
+  // weekends → all four hours pre-checked; weekdays → the two evening hours.
+  function defaultSlotsFor(dateStr) {
+    const day = new Date(dateStr + "T12:00:00").getDay();
+    const weekend = day === 0 || day === 6;
+    return weekend ? SLOTS.map((s) => s.id) : ["s18", "s20"];
   }
 
   function tapDate(dateStr) {
@@ -249,7 +281,10 @@ function BookQuadScheduler() {
     const dates = { ...myResp.dates };
     const slots = { ...myResp.slots };
     if (nxt === "unset") { delete dates[dateStr]; delete slots[dateStr]; }
-    else dates[dateStr] = nxt;
+    else {
+      dates[dateStr] = nxt;
+      if (nxt === "free" && !slots[dateStr]) slots[dateStr] = defaultSlotsFor(dateStr);
+    }
     if (nxt === "busy") delete slots[dateStr];
     queueSave({ ...myResp, dates, slots });
   }
@@ -430,7 +465,7 @@ function BookQuadScheduler() {
               <section className="mt-5">
                 <h2 className="text-xl mb-1">Which hours work?</h2>
                 <p className="text-sm mb-3" style={{ color: PALETTE.inkSoft }}>
-                  Times shown in <b>your</b> time ({(CITIES.find((c) => c.tz === myTz) || {}).label}). No math required.
+                  Times shown in <b>your</b> time ({(CITIES.find((c) => c.tz === myTz) || {}).label}). We pre-checked likely hours — evenings on weekdays, everything on weekends. Tap to adjust.
                 </p>
                 <div className="space-y-2">
                   {myFreeDates.map((d) => (
@@ -464,7 +499,12 @@ function BookQuadScheduler() {
               <span aria-live="polite">
                 {saveState === "saving" && "Saving…"}
                 {saveState === "saved" && "✓ Saved for the quad to see"}
-                {saveState === "error" && "Couldn't save — check your connection and tap a date again."}
+                {saveState === "error" && (
+                  <span style={{ color: "#A94459" }}>
+                    Couldn't save{saveErr ? ` — ${saveErr}` : ""}.{" "}
+                    <button className="underline" onClick={() => queueSave(myResp)}>Retry</button>
+                  </span>
+                )}
               </span>
               <button onClick={clearMine} className="underline">Clear my answers</button>
             </div>
