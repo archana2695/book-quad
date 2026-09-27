@@ -45,9 +45,9 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 
 const PASSCODE = "bookquad"; // shared quad passcode (case-insensitive)
 
-// Lock the app to one month ("YYYY-MM"). Set to null to restore
-// the month arrows + current-month behavior.
-const PINNED_MONTH = "2026-09";
+// Lock the app to one month ("YYYY-MM"). Set to null for the rolling
+// scheduler: opens on the current month, arrows step forward/back.
+const PINNED_MONTH = null;
 
 const MEMBERS = ["Abhilasha", "Amika", "Ashni", "Archana"];
 
@@ -203,10 +203,14 @@ function BookQuadScheduler() {
   const [saveState, setSaveState] = useState("idle");
   const [saveErr, setSaveErr] = useState("");
   const saveTimer = useRef(null);
+  const pendingSave = useRef(null); // { key, value, month } waiting on the debounce
   const dirtyRef = useRef(false); // true while local edits haven't reached the server
   const meRef = useRef(null);
   useEffect(() => { meRef.current = me; }, [me]);
+  const mkRef = useRef(mk);
+  useEffect(() => { mkRef.current = mk; }, [mk]);
   const today = todayStr();
+  const thisMonth = today.slice(0, 7);
 
   async function loadAll(monthK) {
     const tzMap = {}, next = {};
@@ -216,6 +220,8 @@ function BookQuadScheduler() {
       const r = await kvGet(respKey(monthK, n));
       if (r) next[n] = r;
     }
+    // Month was switched while this load was in flight — drop the stale result
+    if (monthK !== mkRef.current) return;
     setMemberTz((prev) => ({ ...prev, ...tzMap }));
     setResponses((prev) => {
       const merged = { ...next };
@@ -235,6 +241,12 @@ function BookQuadScheduler() {
      everyone sees fresh answers without refreshing */
   useEffect(() => {
     if (!unlocked || !configured) return;
+    // Fresh slate per month so last month's answers don't bleed into this one.
+    // Flush (not drop) any edit still waiting in the save debounce.
+    if (saveTimer.current) { clearTimeout(saveTimer.current); flushSave(); }
+    dirtyRef.current = false;
+    setSaveState("idle");
+    setResponses({});
     setLoading(true);
     loadAll(mk);
     const t = setInterval(() => loadAll(mk), 60000);
@@ -264,17 +276,25 @@ function BookQuadScheduler() {
     setSaveState("saving");
     setSaveErr("");
     clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(async () => {
-      const res = await kvSet(respKey(mk, me), stamped);
-      if (res.ok) {
-        dirtyRef.current = false;
-        setSaveState("saved");
-      } else {
-        // Keep edits on screen (dirtyRef stays true) and show why it failed
-        setSaveState("error");
-        setSaveErr(res.msg);
-      }
-    }, 500);
+    pendingSave.current = { key: respKey(mk, me), value: stamped, month: mk };
+    saveTimer.current = setTimeout(flushSave, 500);
+  }
+
+  async function flushSave() {
+    const job = pendingSave.current;
+    saveTimer.current = null;
+    pendingSave.current = null;
+    if (!job) return;
+    const res = await kvSet(job.key, job.value);
+    if (job.month !== mkRef.current) return; // saved for a month we've since left
+    if (res.ok) {
+      dirtyRef.current = false;
+      setSaveState("saved");
+    } else {
+      // Keep edits on screen (dirtyRef stays true) and show why it failed
+      setSaveState("error");
+      setSaveErr(res.msg);
+    }
   }
 
   // Sensible defaults when a date is first marked free:
@@ -437,7 +457,9 @@ function BookQuadScheduler() {
             <div className="flex items-center justify-between mt-6 mb-2">
               {!PINNED_MONTH && (
                 <button onClick={() => setMk(shiftMonth(mk, -1))} aria-label="Previous month"
-                  className="w-9 h-9 rounded-full text-lg" style={{ border: `1.5px solid ${PALETTE.ink}` }}>←</button>
+                  disabled={mk <= thisMonth}
+                  className="w-9 h-9 rounded-full text-lg"
+                  style={{ border: `1.5px solid ${PALETTE.ink}`, opacity: mk <= thisMonth ? 0.25 : 1 }}>←</button>
               )}
               <h2 className="text-2xl mx-auto">{monthLabel(mk)}</h2>
               {!PINNED_MONTH && (
